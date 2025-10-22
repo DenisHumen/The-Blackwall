@@ -1,0 +1,1 @@
+"""FirewallLog model (hypertable)"""

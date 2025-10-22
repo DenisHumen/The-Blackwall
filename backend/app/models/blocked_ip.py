@@ -1,0 +1,1 @@
+"""BlockedIP model"""

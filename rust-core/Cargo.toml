@@ -1,0 +1,12 @@
+# Firewall Manager - Rust Core
+[package]
+name = "firewall-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# TODO: Add dependencies
+
+[lib]
+name = "firewall_core"
+crate-type = ["cdylib", "rlib"]
