@@ -2,6 +2,9 @@
 
 Комплексная система управления межсетевым экраном на базе Python, Rust, React и PostgreSQL.
 
+![TheBlackWall](assets/images/TheBlackWall_4K.gif)
+
+
 ## Архитектура
 
 - **Frontend**: React + TypeScript + Vite + TailwindCSS
