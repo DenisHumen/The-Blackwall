@@ -1,4 +1,4 @@
-# Firewall Manager
+# Firewall Manager (прект на стадии зачатка)
 
 Комплексная система управления межсетевым экраном на базе Python, Rust, React и PostgreSQL.
 
