@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from datetime import datetime
 
 
@@ -25,8 +25,7 @@ class GatewayResponse(GatewayBase):
     consecutive_failures: int
     total_downtime_sec: float
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # --- LoadBalancer ---
@@ -70,8 +69,7 @@ class LoadBalancerResponse(LoadBalancerBase):
     updated_at: datetime
     gateways: list[GatewayResponse]
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class LoadBalancerStatus(BaseModel):

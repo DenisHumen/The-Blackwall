@@ -26,8 +26,7 @@ class Settings(BaseSettings):
     CORS_ORIGINS: list[str] = ["http://localhost:5173"]
     TESTING: bool = False
 
-    class Config:
-        env_prefix = "BLACKWALL_"
+    model_config = {"env_prefix": "BLACKWALL_"}
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

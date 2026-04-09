@@ -44,11 +44,15 @@ from app.api.auth import router as auth_router
 from app.api.metrics import router as metrics_router
 from app.api.loadbalancer import router as lb_router
 from app.api.updater import router as updater_router
+from app.api.rules import router as rules_router
+from app.api.logs import router as logs_router
 
 app.include_router(auth_router)
 app.include_router(metrics_router)
 app.include_router(lb_router)
 app.include_router(updater_router)
+app.include_router(rules_router)
+app.include_router(logs_router)
 
 
 # --- SPA static serving (production) ---

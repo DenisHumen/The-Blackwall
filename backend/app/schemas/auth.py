@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from datetime import datetime
 
 class SetupRequest(BaseModel):
@@ -17,8 +17,7 @@ class UserResponse(BaseModel):
     created_at: datetime
     last_login: datetime | None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class TokenData(BaseModel):
     user_id: int
