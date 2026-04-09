@@ -1,0 +1,33 @@
+[Unit]
+Description=The Blackwall — Traffic Monitor Service
+Documentation=https://github.com/DenisHumen/The-Blackwall
+After=blackwall-backend.service
+BindsTo=blackwall-backend.service
+
+[Service]
+Type=exec
+User=__USER__
+Group=__USER__
+WorkingDirectory=__INSTALL_DIR__/backend
+Environment=PATH=__VENV__/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+Environment=PYTHONPATH=__INSTALL_DIR__/backend
+ExecStart=__VENV__/bin/python -m app.workers.monitor
+Restart=always
+RestartSec=10
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=__INSTALL_DIR__/backend
+PrivateTmp=true
+
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=blackwall-monitor
+
+[Install]
+WantedBy=multi-user.target

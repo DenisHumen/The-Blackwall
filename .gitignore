@@ -1,3 +1,66 @@
-# macOS
+# ═══════════════════════════════════════════════════
+#  The Blackwall — .gitignore
+# ═══════════════════════════════════════════════════
+
+# ── OS ──
 .DS_Store
 .DS_Store?
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# ── Python virtual environment ──
+backend/venv/
+venv/
+.venv/
+
+# ── Local data (databases, secrets, configs) ──
+backend/blackwall.db
+backend/.secret_key
+backend/.env
+.env
+.env.local
+.env.production
+config/local/
+data/
+
+# ── Backups (created by updater) ──
+backups/
+
+# ── Node.js / Frontend ──
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# ── Rust ──
+rust-core/target/
+
+# ── IDE ──
+.idea/
+.vscode/
+*.sublime-workspace
+*.sublime-project
+
+# ── Logs ──
+*.log
+logs/
+
+# ── Install artifacts ──
+/tmp/blackwall-install.log

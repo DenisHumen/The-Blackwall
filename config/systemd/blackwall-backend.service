@@ -1,0 +1,38 @@
+[Unit]
+Description=The Blackwall — Backend API Server
+Documentation=https://github.com/DenisHumen/The-Blackwall
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=__USER__
+Group=__USER__
+WorkingDirectory=__INSTALL_DIR__/backend
+Environment=PATH=__VENV__/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+Environment=PYTHONPATH=__INSTALL_DIR__/backend
+ExecStart=__VENV__/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=__INSTALL_DIR__/backend
+ReadWritePaths=__INSTALL_DIR__/backups
+PrivateTmp=true
+
+# Capabilities for networking (LB needs ip route, iptables)
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=blackwall-backend
+
+[Install]
+WantedBy=multi-user.target
