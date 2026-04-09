@@ -32,6 +32,14 @@ logger = logging.getLogger("blackwall.loadbalancer")
 IS_LINUX = platform.system() == "Linux"
 
 # ---------------------------------------------------------------------------
+# Saved routing state — used to restore networking on deactivation and to
+# keep upstream gateways reachable after the default route is replaced.
+# ---------------------------------------------------------------------------
+
+_saved_default_route: dict | None = None  # {"gateway": str, "interface": str}
+_installed_host_routes: list[dict] = []   # [{"address": str, "via": str}]
+
+# ---------------------------------------------------------------------------
 # Input validation (prevent command injection)
 # ---------------------------------------------------------------------------
 
@@ -189,6 +197,142 @@ async def interface_exists(name: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Original route management — save/restore default route
+# ---------------------------------------------------------------------------
+
+async def get_default_route() -> dict | None:
+    """Parse the current default route from the kernel routing table.
+
+    Returns {"gateway": "x.x.x.x", "interface": "ethX"} or None.
+    """
+    if not IS_LINUX:
+        logger.info("[SIM] Would read default route")
+        return {"gateway": "10.0.0.1", "interface": "sim0"}
+
+    rc, out, _ = await _run(["ip", "route", "show", "default"], check=False)
+    if rc != 0 or not out:
+        return None
+
+    # Parse: "default via 10.0.0.1 dev ens18 proto static metric 100"
+    gw_match = re.search(r"\bvia\s+(\S+)", out)
+    dev_match = re.search(r"\bdev\s+(\S+)", out)
+    if not gw_match:
+        return None
+
+    return {
+        "gateway": gw_match.group(1),
+        "interface": dev_match.group(1) if dev_match else "",
+    }
+
+
+async def save_original_route() -> dict | None:
+    """Save the current default route so it can be restored later.
+
+    Called once before the balancer first modifies the default route.
+    Subsequent calls are no-ops (preserves the very first route).
+    """
+    global _saved_default_route
+    if _saved_default_route is not None:
+        return _saved_default_route
+
+    route = await get_default_route()
+    if route:
+        _saved_default_route = route
+        logger.info("Saved original default route: via %s dev %s",
+                    route["gateway"], route["interface"])
+    return route
+
+
+async def restore_original_route() -> bool:
+    """Restore the default route that was saved before the balancer started.
+
+    Also removes any host routes that were added for upstream gateways.
+    """
+    global _saved_default_route, _installed_host_routes
+
+    if not IS_LINUX:
+        logger.info("[SIM] Would restore original route")
+        _saved_default_route = None
+        _installed_host_routes.clear()
+        return True
+
+    ok = True
+
+    # 1. Restore default route
+    if _saved_default_route:
+        gw = _saved_default_route["gateway"]
+        iface = _saved_default_route["interface"]
+        _validate_ip(gw)
+        if iface:
+            _validate_iface(iface)
+            rc, _, _ = await _run(
+                ["ip", "route", "replace", "default", "via", gw, "dev", iface])
+        else:
+            rc, _, _ = await _run(
+                ["ip", "route", "replace", "default", "via", gw])
+        if rc == 0:
+            logger.info("Restored original default route: via %s dev %s", gw, iface)
+        else:
+            ok = False
+    else:
+        logger.warning("No saved default route to restore")
+
+    # 2. Remove host routes added for upstream gateways
+    for hr in _installed_host_routes:
+        await _run(["ip", "route", "del", f"{hr['address']}/32"], check=False)
+        logger.debug("Removed host route for %s", hr["address"])
+    _installed_host_routes.clear()
+
+    _saved_default_route = None
+    return ok
+
+
+async def ensure_gateway_host_routes(gateway_addresses: list[str]) -> bool:
+    """Add /32 host routes for each upstream gateway via the original default
+    gateway.  This guarantees the node can always reach upstream gateways even
+    after the default route is replaced.
+
+    Only adds routes that don't already exist.
+    """
+    global _installed_host_routes
+
+    if not _saved_default_route:
+        logger.warning("Cannot add host routes: original route not saved")
+        return False
+
+    orig_gw = _saved_default_route["gateway"]
+    orig_iface = _saved_default_route["interface"]
+
+    if not IS_LINUX:
+        for addr in gateway_addresses:
+            logger.info("[SIM] Would add host route %s/32 via %s", addr, orig_gw)
+            _installed_host_routes.append({"address": addr, "via": orig_gw})
+        return True
+
+    for addr in gateway_addresses:
+        _validate_ip(addr)
+        # Skip if this IS the original gateway (no route needed)
+        if addr == orig_gw:
+            continue
+        # Skip if host route already installed
+        if any(hr["address"] == addr for hr in _installed_host_routes):
+            continue
+
+        cmd = ["ip", "route", "replace", f"{addr}/32", "via", orig_gw]
+        if orig_iface:
+            _validate_iface(orig_iface)
+            cmd += ["dev", orig_iface]
+        rc, _, _ = await _run(cmd, check=False)
+        if rc == 0:
+            _installed_host_routes.append({"address": addr, "via": orig_gw})
+            logger.info("Added host route: %s/32 via %s dev %s", addr, orig_gw, orig_iface)
+        else:
+            logger.warning("Failed to add host route for %s", addr)
+
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Routing management
 # ---------------------------------------------------------------------------
 
@@ -291,11 +435,37 @@ async def setup_nat_masquerade(interface_name: str = "") -> bool:
 
 
 async def clear_nat_masquerade() -> bool:
-    """Flush NAT masquerade rules."""
+    """Remove only masquerade rules added by the load balancer.
+
+    Instead of flushing the entire POSTROUTING chain (which would destroy
+    rules set by other subsystems), we delete only MASQUERADE rules.
+    """
     if not IS_LINUX:
         return True
-    rc, _, _ = await _run(["iptables", "-t", "nat", "-F", "POSTROUTING"])
-    return rc == 0
+
+    # List rules with line numbers, then remove MASQUERADE ones in reverse
+    rc, out, _ = await _run(
+        ["iptables", "-t", "nat", "-L", "POSTROUTING", "--line-numbers", "-n"],
+        check=False,
+    )
+    if rc != 0:
+        return False
+
+    lines_to_del: list[int] = []
+    for line in out.splitlines():
+        if "MASQUERADE" in line:
+            parts = line.split()
+            if parts and parts[0].isdigit():
+                lines_to_del.append(int(parts[0]))
+
+    # Delete in reverse order so line numbers stay valid
+    for num in sorted(lines_to_del, reverse=True):
+        await _run(
+            ["iptables", "-t", "nat", "-D", "POSTROUTING", str(num)],
+            check=False,
+        )
+
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -452,7 +622,12 @@ class BalancerEngine:
                 await asyncio.sleep(5)
 
     async def _apply_routes(self, cfg, db):
-        """Apply routing based on mode and current gateway health."""
+        """Apply routing based on mode and current gateway health.
+
+        Before replacing the default route, the original route is saved and
+        host routes to all upstream gateways are installed so the node never
+        loses the ability to reach them (and thus never loses internet).
+        """
         now = datetime.now(timezone.utc)
         healthy = [gw for gw in cfg.gateways if gw.is_healthy]
 
@@ -462,6 +637,16 @@ class BalancerEngine:
 
         # Enable IP forwarding so this node acts as a router
         await enable_ip_forwarding()
+
+        # --- Preserve the node's own connectivity -----------------------
+        # 1. Save the original default route (no-op after first call)
+        await save_original_route()
+
+        # 2. Ensure host routes exist for every upstream gateway so the
+        #    node can reach them even after the default route changes.
+        all_gw_addrs = [gw.address for gw in cfg.gateways]
+        await ensure_gateway_host_routes(all_gw_addrs)
+        # ----------------------------------------------------------------
 
         if cfg.mode == "round_robin":
             gw_dicts = [
@@ -529,10 +714,15 @@ async def activate_balancer(config_id: int, db_session_factory) -> BalancerEngin
 
 
 async def deactivate_balancer(config_id: int):
-    """Stop and remove a balancer engine."""
+    """Stop and remove a balancer engine, restoring original networking."""
     engine = _engines.pop(config_id, None)
     if engine:
         await engine.stop()
+    # Restore the node's original default route and remove host routes
+    await restore_original_route()
+    # Clean up NAT masquerade rules added by the balancer
+    await clear_nat_masquerade()
+    logger.info("Balancer %d deactivated, original route restored", config_id)
 
 
 async def deactivate_all():

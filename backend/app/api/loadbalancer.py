@@ -30,6 +30,9 @@ from app.core.loadbalancer import (
     get_active_engines,
     detect_interface,
     enable_ip_forwarding,
+    save_original_route,
+    restore_original_route,
+    ensure_gateway_host_routes,
 )
 
 router = APIRouter(prefix="/api/loadbalancer", tags=["loadbalancer"])
@@ -154,8 +157,13 @@ async def delete_config(
 # ---------------------------------------------------------------------------
 
 async def _activate_config(cfg: LoadBalancerConfig):
-    """Enable IP forwarding, create virtual interface (if enabled), start engine."""
+    """Enable IP forwarding, save original route, create virtual interface (if enabled), start engine."""
+    # Save the original default route BEFORE any changes
+    await save_original_route()
     await enable_ip_forwarding()
+    # Ensure host routes for all upstream gateways
+    gw_addrs = [gw.address for gw in cfg.gateways]
+    await ensure_gateway_host_routes(gw_addrs)
     if cfg.use_virtual_interface and cfg.virtual_interface and cfg.virtual_ip:
         await create_virtual_interface(cfg.virtual_interface, cfg.virtual_ip)
     await activate_balancer(cfg.id, SessionLocal)
