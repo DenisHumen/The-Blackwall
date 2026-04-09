@@ -120,7 +120,13 @@ async def detect_interface(gateway_ip: str) -> str | None:
 
 
 async def enable_ip_forwarding() -> bool:
-    """Enable IPv4 forwarding so this node can act as a gateway/router."""
+    """Enable IPv4 forwarding and disable ICMP redirects.
+
+    When this node acts as a gateway and the incoming/outgoing interface is
+    the same (typical single-NIC LAN setup), the kernel sends ICMP Redirect
+    messages telling clients to bypass this node.  That defeats the purpose
+    of the load balancer, so we must disable send_redirects.
+    """
     if not IS_LINUX:
         logger.info("[SIM] Would enable IP forwarding")
         return True
@@ -128,6 +134,29 @@ async def enable_ip_forwarding() -> bool:
     rc, _, _ = await _run(["sysctl", "-w", "net.ipv4.ip_forward=1"])
     if rc == 0:
         logger.info("IP forwarding enabled")
+
+    # Disable ICMP redirects — critical for single-NIC gateway setups.
+    # Without this, the kernel tells LAN clients to skip this node and go
+    # directly to the upstream gateway, breaking load balancing / failover.
+    await _run(["sysctl", "-w", "net.ipv4.conf.all.send_redirects=0"])
+    await _run(["sysctl", "-w", "net.ipv4.conf.default.send_redirects=0"])
+
+    # Also disable accepting redirects on this node so other routers
+    # on the LAN cannot override our routing decisions.
+    await _run(["sysctl", "-w", "net.ipv4.conf.all.accept_redirects=0"])
+    await _run(["sysctl", "-w", "net.ipv4.conf.default.accept_redirects=0"])
+
+    # Disable per-interface send_redirects for all current interfaces
+    rc2, out, _ = await _run(["ls", "/proc/sys/net/ipv4/conf"], check=False)
+    if rc2 == 0:
+        for iface in out.split():
+            if iface in ("all", "default"):
+                continue
+            await _run(
+                ["sysctl", "-w", f"net.ipv4.conf.{iface}.send_redirects=0"],
+                check=False,
+            )
+
     return rc == 0
 
 
@@ -246,7 +275,8 @@ async def save_original_route() -> dict | None:
 async def restore_original_route() -> bool:
     """Restore the default route that was saved before the balancer started.
 
-    Also removes any host routes that were added for upstream gateways.
+    Also removes any host routes that were added for upstream gateways and
+    re-enables ICMP redirects (kernel default).
     """
     global _saved_default_route, _installed_host_routes
 
@@ -257,6 +287,12 @@ async def restore_original_route() -> bool:
         return True
 
     ok = True
+
+    # 0. Restore ICMP redirects to kernel defaults
+    await _run(["sysctl", "-w", "net.ipv4.conf.all.send_redirects=1"], check=False)
+    await _run(["sysctl", "-w", "net.ipv4.conf.default.send_redirects=1"], check=False)
+    await _run(["sysctl", "-w", "net.ipv4.conf.all.accept_redirects=1"], check=False)
+    await _run(["sysctl", "-w", "net.ipv4.conf.default.accept_redirects=1"], check=False)
 
     # 1. Restore default route
     if _saved_default_route:
@@ -287,12 +323,38 @@ async def restore_original_route() -> bool:
     return ok
 
 
+async def _is_directly_reachable(address: str) -> bool:
+    """Check if address is in a directly connected subnet (no router needed).
+
+    If the address matches a connected route (proto kernel), a host route
+    via another gateway would be harmful — the address is already reachable
+    on the local LAN.
+    """
+    if not IS_LINUX:
+        return False
+
+    _validate_ip(address)
+    rc, out, _ = await _run(
+        ["ip", "route", "get", address], check=False
+    )
+    if rc != 0:
+        return False
+
+    # If output does NOT contain 'via', the address is directly connected
+    # Example direct:   "10.0.0.1 dev ens18 src 10.0.0.123 uid 0"
+    # Example indirect: "10.0.0.1 via 10.0.0.2 dev ens18 src 10.0.0.123"
+    return " via " not in out
+
+
 async def ensure_gateway_host_routes(gateway_addresses: list[str]) -> bool:
     """Add /32 host routes for each upstream gateway via the original default
     gateway.  This guarantees the node can always reach upstream gateways even
     after the default route is replaced.
 
     Only adds routes that don't already exist.
+    Skips gateways that are directly reachable on a connected subnet
+    (same LAN) because adding a host route via another gateway for them
+    would be harmful and could create recursive routing.
     """
     global _installed_host_routes
 
@@ -316,6 +378,15 @@ async def ensure_gateway_host_routes(gateway_addresses: list[str]) -> bool:
             continue
         # Skip if host route already installed
         if any(hr["address"] == addr for hr in _installed_host_routes):
+            continue
+        # Skip gateways on the same directly-connected subnet.
+        # They are reachable via the connected route (e.g. 10.0.0.0/10 dev ens18).
+        # Adding a host route via orig_gw would break direct connectivity and
+        # can cause recursive routing when this address is later used as default gw.
+        if await _is_directly_reachable(addr):
+            logger.debug(
+                "Skipping host route for %s — directly reachable on local subnet", addr
+            )
             continue
 
         cmd = ["ip", "route", "replace", f"{addr}/32", "via", orig_gw]
@@ -539,6 +610,7 @@ class BalancerEngine:
         self.config_id = config_id
         self._task: asyncio.Task | None = None
         self._running = False
+        self._routes_applied = False  # Force route re-apply after engine (re)start
 
     async def start(self, db_session_factory):
         """Start the health-check loop."""
@@ -607,9 +679,12 @@ class BalancerEngine:
                             changed = True
                             logger.info("Gateway %s (%s) recovered", gw.address, gw.interface_name)
 
-                    # Apply routing changes
-                    if changed or cfg.active_gateway_id is None:
+                    # Apply routing changes.
+                    # Always apply on first iteration after engine (re)start because
+                    # kernel routes are ephemeral and don't survive service restarts.
+                    if changed or not self._routes_applied:
                         await self._apply_routes(cfg, db)
+                        self._routes_applied = True
 
                     await db.commit()
 
