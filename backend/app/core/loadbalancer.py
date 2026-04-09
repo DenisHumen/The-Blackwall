@@ -1,13 +1,19 @@
 """
 Load Balancer networking service.
 
-Manages virtual interfaces, routing tables, and automatic provider switching.
+This node acts as the main gateway for the local network (e.g. 10.0.0.123).
+Traffic from LAN clients is forwarded through upstream gateways (routers/switches).
+
+Supported modes:
+  - Failover: primary upstream gateway with automatic switchover to backup
+  - Round-robin: distribute traffic across multiple upstreams with weights
 
 On Linux (production):
-  - Creates dummy interfaces for client gateways
-  - Manages ip route / ip rule for traffic distribution
-  - Round-robin: multipath routes with weights
-  - Failover: routing table switching on health failure
+  - Enables IP forwarding so this node acts as a router
+  - Manages default route to point to the active upstream gateway
+  - Sets up NAT masquerade for outgoing traffic
+  - Auto-detects outgoing interface via 'ip route get'
+  - Optional: creates dummy interfaces for virtual gateway IP
 
 On macOS/other (development):
   - Simulates interface status
@@ -69,6 +75,52 @@ async def _run(args: list[str], check: bool = True) -> tuple[int, str, str]:
     if check and proc.returncode != 0:
         logger.error("Command failed %s: %s", args, err)
     return proc.returncode, out, err
+
+
+# ---------------------------------------------------------------------------
+# Interface auto-detection
+# ---------------------------------------------------------------------------
+
+async def detect_interface(gateway_ip: str) -> str | None:
+    """Auto-detect the outgoing interface for a given gateway IP.
+
+    Uses 'ip route get <ip>' to determine which interface the kernel
+    would use to reach that gateway.
+    Returns interface name or None if detection fails.
+    """
+    _validate_ip(gateway_ip)
+
+    if not IS_LINUX:
+        logger.info("[SIM] Would detect interface for %s", gateway_ip)
+        return "sim0"
+
+    rc, out, _ = await _run(["ip", "route", "get", gateway_ip], check=False)
+    if rc != 0:
+        logger.warning("Cannot detect interface for %s", gateway_ip)
+        return None
+
+    # Parse output like: "10.0.1.1 via 10.0.0.1 dev ens18 src 10.0.0.123 uid 0"
+    # or: "10.0.0.2 dev ens18 src 10.0.0.123 uid 0"
+    match = re.search(r"\bdev\s+(\S+)", out)
+    if match:
+        iface = match.group(1)
+        logger.debug("Detected interface %s for gateway %s", iface, gateway_ip)
+        return iface
+
+    logger.warning("Could not parse interface from: %s", out)
+    return None
+
+
+async def enable_ip_forwarding() -> bool:
+    """Enable IPv4 forwarding so this node can act as a gateway/router."""
+    if not IS_LINUX:
+        logger.info("[SIM] Would enable IP forwarding")
+        return True
+
+    rc, _, _ = await _run(["sysctl", "-w", "net.ipv4.ip_forward=1"])
+    if rc == 0:
+        logger.info("IP forwarding enabled")
+    return rc == 0
 
 
 # ---------------------------------------------------------------------------
@@ -146,19 +198,36 @@ async def apply_round_robin_routes(
 ) -> bool:
     """Set up multipath routing with weights for round-robin balancing.
 
-    gateways: [{"address": "192.168.1.1", "interface_name": "eth0", "weight": 2}, ...]
+    gateways: [{"address": "10.0.1.1", "interface_name": "ens18", "weight": 2}, ...]
+    interface_name is auto-detected if empty.
     """
+    healthy = [g for g in gateways if g.get("is_healthy", True)]
+
     if not IS_LINUX:
         nexthops = " ".join(
-            f"nexthop via {g['address']} dev {g['interface_name']} weight {g.get('weight', 1)}"
-            for g in gateways if g.get("is_healthy", True)
+            f"nexthop via {g['address']} weight {g.get('weight', 1)}"
+            for g in healthy
         )
         logger.info("[SIM] Round-robin route: ip route replace default %s", nexthops)
         return True
 
-    healthy = [g for g in gateways if g.get("is_healthy", True)]
     if not healthy:
         logger.warning("No healthy gateways for round-robin!")
+        return False
+
+    # Auto-detect interfaces for gateways that don't have one specified
+    for g in healthy:
+        if not g.get("interface_name"):
+            detected = await detect_interface(g["address"])
+            if detected:
+                g["interface_name"] = detected
+            else:
+                logger.warning("Cannot detect interface for gateway %s, skipping", g["address"])
+                continue
+
+    healthy = [g for g in healthy if g.get("interface_name")]
+    if not healthy:
+        logger.warning("No gateways with resolvable interfaces!")
         return False
 
     # Build multipath default route — argument list
@@ -177,33 +246,47 @@ async def apply_round_robin_routes(
 
 async def apply_failover_route(
     gateway_address: str,
-    interface_name: str,
-    table_id: int = 100,
+    interface_name: str = "",
 ) -> bool:
-    """Switch the default route to the specified gateway (failover mode)."""
+    """Switch the default route to the specified upstream gateway (failover mode).
+
+    If interface_name is empty, it is auto-detected from the routing table.
+    """
     _validate_ip(gateway_address)
-    _validate_iface(interface_name)
+
+    if not interface_name:
+        interface_name = await detect_interface(gateway_address) or ""
 
     if not IS_LINUX:
-        logger.info("[SIM] Failover route: via %s dev %s (table %d)", gateway_address, interface_name, table_id)
+        logger.info("[SIM] Failover route: via %s dev %s", gateway_address, interface_name or "auto")
         return True
 
-    # Set route in main table
-    rc, _, _ = await _run(["ip", "route", "replace", "default", "via", gateway_address, "dev", interface_name])
+    if interface_name:
+        _validate_iface(interface_name)
+        rc, _, _ = await _run(["ip", "route", "replace", "default", "via", gateway_address, "dev", interface_name])
+    else:
+        # Let kernel decide the interface
+        rc, _, _ = await _run(["ip", "route", "replace", "default", "via", gateway_address])
+
     if rc == 0:
-        logger.info("Failover: switched to %s via %s", gateway_address, interface_name)
+        logger.info("Failover: switched to %s via %s", gateway_address, interface_name or "auto")
     return rc == 0
 
 
-async def setup_nat_masquerade(interface_name: str) -> bool:
-    """Set up MASQUERADE NAT for outgoing traffic on a provider interface."""
-    _validate_iface(interface_name)
+async def setup_nat_masquerade(interface_name: str = "") -> bool:
+    """Set up MASQUERADE NAT for outgoing traffic.
 
+    If interface_name is empty, masquerade on all interfaces.
+    """
     if not IS_LINUX:
-        logger.info("[SIM] Would set NAT masquerade on %s", interface_name)
+        logger.info("[SIM] Would set NAT masquerade on %s", interface_name or "all")
         return True
 
-    rc, _, _ = await _run(["iptables", "-t", "nat", "-A", "POSTROUTING", "-o", interface_name, "-j", "MASQUERADE"])
+    if interface_name:
+        _validate_iface(interface_name)
+        rc, _, _ = await _run(["iptables", "-t", "nat", "-A", "POSTROUTING", "-o", interface_name, "-j", "MASQUERADE"])
+    else:
+        rc, _, _ = await _run(["iptables", "-t", "nat", "-A", "POSTROUTING", "-j", "MASQUERADE"])
     return rc == 0
 
 
@@ -221,18 +304,20 @@ async def clear_nat_masquerade() -> bool:
 
 async def ping_check(address: str, check_target: str = "8.8.8.8",
                      timeout: float = 2.0) -> tuple[bool, float | None]:
-    """Check if a gateway can reach the internet by pinging check_target through it.
+    """Check if an upstream gateway can reach the internet.
 
-    On Linux uses: ping -c 1 -W <timeout> -I <gateway_addr> <target>
+    First verifies the gateway itself is reachable (ping gateway),
+    then checks internet connectivity through it by adding a temporary
+    route for the check_target via this gateway.
     Returns: (is_reachable, latency_ms)
     """
     try:
         start = time.monotonic()
+
         if IS_LINUX:
-            # Ping through the specific gateway's interface
-            cmd = ["ping", "-c", "1", "-W", str(int(timeout)), check_target]
+            # Step 1: Check if the gateway itself is reachable
+            cmd = ["ping", "-c", "1", "-W", str(int(timeout)), address]
         else:
-            # macOS / dev fallback — just ping the gateway itself
             cmd = ["ping", "-c", "1", "-W", str(int(timeout * 1000)), address]
 
         proc = await asyncio.create_subprocess_exec(
@@ -241,6 +326,28 @@ async def ping_check(address: str, check_target: str = "8.8.8.8",
             stderr=asyncio.subprocess.DEVNULL,
         )
         returncode = await asyncio.wait_for(proc.wait(), timeout=timeout + 2)
+
+        if returncode != 0:
+            return False, None
+
+        if IS_LINUX and check_target and check_target != address:
+            # Step 2: Check internet through this specific gateway
+            # Add a temporary host route for check_target via this gateway
+            _validate_ip(address)
+            _validate_ip(check_target)
+            await _run(["ip", "route", "replace", f"{check_target}/32", "via", address], check=False)
+
+            cmd2 = ["ping", "-c", "1", "-W", str(int(timeout)), check_target]
+            proc2 = await asyncio.create_subprocess_exec(
+                *cmd2,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            returncode = await asyncio.wait_for(proc2.wait(), timeout=timeout + 2)
+
+            # Clean up temporary route
+            await _run(["ip", "route", "del", f"{check_target}/32", "via", address], check=False)
+
         elapsed = (time.monotonic() - start) * 1000
         return returncode == 0, round(elapsed, 2)
     except (asyncio.TimeoutError, Exception):
@@ -353,21 +460,27 @@ class BalancerEngine:
             logger.error("Config %d: ALL gateways down, no route change possible", cfg.id)
             return
 
+        # Enable IP forwarding so this node acts as a router
+        await enable_ip_forwarding()
+
         if cfg.mode == "round_robin":
             gw_dicts = [
-                {"address": gw.address, "interface_name": gw.interface_name,
+                {"address": gw.address, "interface_name": gw.interface_name or "",
                  "weight": gw.weight, "is_healthy": gw.is_healthy}
                 for gw in cfg.gateways
             ]
             await apply_round_robin_routes(gw_dicts)
 
-            # Set up NAT for all healthy gateways
+            # Set up NAT masquerade
             if IS_LINUX:
                 await clear_nat_masquerade()
                 for gw in healthy:
-                    await setup_nat_masquerade(gw.interface_name)
+                    iface = gw.interface_name or await detect_interface(gw.address) or ""
+                    if iface:
+                        await setup_nat_masquerade(iface)
+                    else:
+                        await setup_nat_masquerade()
 
-            # Active == first healthy
             cfg.active_gateway_id = healthy[0].id
 
         elif cfg.mode == "failover":
@@ -381,11 +494,15 @@ class BalancerEngine:
                 cfg.last_switch = now
                 cfg.switch_count += 1
 
-                await apply_failover_route(chosen.address, chosen.interface_name)
+                await apply_failover_route(chosen.address, chosen.interface_name or "")
 
                 if IS_LINUX:
                     await clear_nat_masquerade()
-                    await setup_nat_masquerade(chosen.interface_name)
+                    iface = chosen.interface_name or await detect_interface(chosen.address) or ""
+                    if iface:
+                        await setup_nat_masquerade(iface)
+                    else:
+                        await setup_nat_masquerade()
 
                 logger.info(
                     "Failover switch: gw %s -> gw %s (total switches: %d)",

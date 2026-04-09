@@ -69,7 +69,7 @@ export interface Gateway {
 
 export interface GatewayCreate {
   address: string
-  interface_name: string
+  interface_name?: string
   weight?: number
   priority?: number
   is_primary?: boolean

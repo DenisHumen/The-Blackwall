@@ -20,7 +20,7 @@ StartLimitBurst=5
 # Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
+ProtectHome=false
 ReadWritePaths=__INSTALL_DIR__/backend
 ReadWritePaths=__INSTALL_DIR__/backups
 PrivateTmp=true

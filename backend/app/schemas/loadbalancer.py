@@ -6,7 +6,7 @@ from datetime import datetime
 
 class GatewayBase(BaseModel):
     address: str
-    interface_name: str
+    interface_name: str = ""
     weight: int = 1
     priority: int = 1
     is_primary: bool = False

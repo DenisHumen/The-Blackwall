@@ -28,6 +28,8 @@ from app.core.loadbalancer import (
     interface_exists,
     ping_check,
     get_active_engines,
+    detect_interface,
+    enable_ip_forwarding,
 )
 
 router = APIRouter(prefix="/api/loadbalancer", tags=["loadbalancer"])
@@ -152,7 +154,8 @@ async def delete_config(
 # ---------------------------------------------------------------------------
 
 async def _activate_config(cfg: LoadBalancerConfig):
-    """Create virtual interface (if enabled) and start the balancer engine."""
+    """Enable IP forwarding, create virtual interface (if enabled), start engine."""
+    await enable_ip_forwarding()
     if cfg.use_virtual_interface and cfg.virtual_interface and cfg.virtual_ip:
         await create_virtual_interface(cfg.virtual_interface, cfg.virtual_ip)
     await activate_balancer(cfg.id, SessionLocal)

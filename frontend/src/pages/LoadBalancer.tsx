@@ -71,7 +71,7 @@ export default function LoadBalancer() {
         <div>
           <h1 className="text-2xl font-bold">Load Balancer</h1>
           <p className="text-xs text-gray-500 mt-1">
-            Управление балансировкой трафика между провайдерами
+            Эта нода — основной шлюз сети. Трафик перенаправляется через вышестоящие шлюзы (коммутаторы/роутеры).
           </p>
         </div>
         <button onClick={() => setShowCreate(!showCreate)} className="btn-primary text-sm flex items-center gap-2">
@@ -132,8 +132,8 @@ function EmptyState({ onAction }: { onAction: () => void }) {
       </div>
       <h3 className="text-lg font-semibold mb-2">Нет конфигураций</h3>
       <p className="text-sm text-gray-400 mb-6 max-w-md mx-auto">
-        Создайте конфигурацию балансировщика для распределения трафика
-        между несколькими интернет-провайдерами.
+        Создайте конфигурацию для перенаправления трафика
+        через вышестоящие шлюзы (коммутаторы/роутеры) в вашей сети.
       </p>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-xl mx-auto mb-6">
         <div className="bg-dark-900/60 rounded-2xl p-4 text-left border border-dark-600/30">
@@ -142,7 +142,7 @@ function EmptyState({ onAction }: { onAction: () => void }) {
             <span className="font-medium text-sm">Round Robin</span>
           </div>
           <p className="text-xs text-gray-500">
-            Равномерное распределение трафика между провайдерами с учётом весов
+            Равномерное распределение трафика между вышестоящими шлюзами с учётом весов
           </p>
         </div>
         <div className="bg-dark-900/60 rounded-2xl p-4 text-left border border-dark-600/30">
@@ -151,7 +151,7 @@ function EmptyState({ onAction }: { onAction: () => void }) {
             <span className="font-medium text-sm">Failover</span>
           </div>
           <p className="text-xs text-gray-500">
-            Автоматическое переключение на резервный канал при сбое основного
+            Основной шлюз с автопереключением на резервный при сбое
           </p>
         </div>
       </div>
@@ -304,7 +304,7 @@ function GatewayRow({ gw, mode, activeGatewayId }: { gw: Gateway; mode: string; 
           <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-md bg-accent/15 text-accent-light">активен</span>
         )}
       </td>
-      <td className="px-4 py-2.5 text-gray-400">{gw.interface_name}</td>
+      <td className="px-4 py-2.5 text-gray-400">{gw.interface_name || <span className="text-gray-600 italic">авто</span>}</td>
       {mode === 'round_robin' && <td className="px-4 py-2.5 text-gray-300">{gw.weight}</td>}
       {mode === 'failover' && (
         <td className="px-4 py-2.5">
@@ -396,7 +396,7 @@ function CreateForm({ onSubmit, onCancel }: { onSubmit: (data: LoadBalancerCreat
           <label className="block text-xs font-medium text-gray-400 mb-1.5">Режим работы</label>
           <select className="input" value={mode} onChange={e => setMode(e.target.value as any)}>
             <option value="round_robin">Round Robin — балансировка по весам</option>
-            <option value="failover">Failover — основной + резервный</option>
+            <option value="failover">Failover — основной + резервный шлюз</option>
           </select>
         </div>
       </div>
@@ -460,7 +460,7 @@ function CreateForm({ onSubmit, onCancel }: { onSubmit: (data: LoadBalancerCreat
       <div>
         <div className="flex items-center justify-between mb-3">
           <h4 className="text-sm font-medium text-gray-300">
-            Шлюзы провайдеров
+            Вышестоящие шлюзы
             <span className="text-xs text-gray-500 font-normal ml-2">мин. 2 шлюза</span>
           </h4>
           <button type="button" onClick={addGateway} className="text-xs text-accent hover:text-accent-light flex items-center gap-1">
@@ -488,13 +488,13 @@ function CreateForm({ onSubmit, onCancel }: { onSubmit: (data: LoadBalancerCreat
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                 <div>
                   <label className="block text-xs text-gray-500 mb-1">IP адрес шлюза</label>
-                  <input className="input text-sm" placeholder="192.168.1.1" value={gw.address}
+                  <input className="input text-sm" placeholder="10.0.1.1" value={gw.address}
                     onChange={e => updateGateway(i, 'address', e.target.value)} required />
                 </div>
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1">Сетевой интерфейс</label>
-                  <input className="input text-sm" placeholder="eth0, ens18..." value={gw.interface_name}
-                    onChange={e => updateGateway(i, 'interface_name', e.target.value)} required />
+                  <label className="block text-xs text-gray-500 mb-1">Сетевой интерфейс <span className="text-gray-600">(авто)</span></label>
+                  <input className="input text-sm" placeholder="авто-определение" value={gw.interface_name}
+                    onChange={e => updateGateway(i, 'interface_name', e.target.value)} />
                 </div>
                 {mode === 'round_robin' ? (
                   <div>

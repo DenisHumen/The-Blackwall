@@ -40,8 +40,8 @@ class Gateway(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     lb_config_id = Column(Integer, ForeignKey("lb_configs.id", ondelete="CASCADE"), nullable=False)
-    address = Column(String(100), nullable=False)        # Gateway IP, e.g. 192.168.1.1
-    interface_name = Column(String(50), nullable=False)  # Physical iface: eth0, ens18
+    address = Column(String(100), nullable=False)        # Upstream gateway IP, e.g. 10.0.1.1
+    interface_name = Column(String(50), nullable=False, default="")  # Physical iface (auto-detected if empty)
     weight = Column(Integer, default=1)                  # For round_robin
     priority = Column(Integer, default=1)                # For failover (lower = higher priority)
     is_primary = Column(Boolean, default=False)          # For failover mode
