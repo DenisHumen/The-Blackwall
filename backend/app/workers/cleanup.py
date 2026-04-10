@@ -1,1 +1,0 @@
-"""Expired blocks cleanup"""

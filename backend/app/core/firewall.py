@@ -1,1 +1,0 @@
-"""Wrapper над Rust core"""

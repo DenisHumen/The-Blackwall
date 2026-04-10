@@ -1,1 +1,0 @@
-"""SystemSetting model"""
